@@ -1,16 +1,11 @@
+mod fr;
+mod mmap;
+
+use crate::mmap::MemoryMap;
 use regex::Regex;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Error};
-use std::os::raw::c_void;
-use std::{env, fs, io, ptr, slice, time};
-
-#[cfg(windows)]
-use std::mem;
-use std::ops::Deref;
-#[cfg(windows)]
-use std::os::windows::io::AsRawHandle;
-#[cfg(windows)]
-use winapi::um::memoryapi::{CreateFileMappingW, MapViewOfFile};
+use std::{env, fs, time};
 
 fn main() -> Result<(), Error> {
     let args: Vec<String> = env::args().collect();
@@ -28,7 +23,7 @@ fn main() -> Result<(), Error> {
     let chunk = MemoryMap::new(&file, 0, file.metadata()?.len() as usize).unwrap();
     let mut lines: Vec<String> = Vec::new();
     let mut index = 0;
-    for i in index..chunk.len {
+    for i in index..chunk.len() {
         if chunk[i] == ('\n' as u8) {
             lines.push(
                 std::str::from_utf8(&chunk[index..i])
@@ -121,102 +116,6 @@ fn get_patterns<'a>() -> Vec<Pattern<'a>> {
     let mut patterns: Vec<Pattern> = Vec::new();
     patterns.push(Pattern::new("xxx", "xxx"));
     patterns
-}
-
-struct MemoryMap {
-    #[warn(dead_code)]
-    file: Option<File>,
-    ptr: *mut c_void,
-    len: usize,
-}
-impl Deref for MemoryMap {
-    type Target = [u8];
-
-    #[inline]
-    fn deref(&self) -> &[u8] {
-        unsafe { slice::from_raw_parts(self.ptr as *mut u8, self.len) }
-    }
-}
-
-impl AsRef<[u8]> for MemoryMap {
-    #[inline]
-    fn as_ref(&self) -> &[u8] {
-        self.deref()
-    }
-}
-
-#[cfg(unix)]
-fn get_fd(file: &fs::File) -> libc::c_int {
-    file.as_raw_fd()
-}
-
-#[cfg(windows)]
-impl MemoryMap {
-    fn new(file: &File, offset: u64, len: usize) -> io::Result<MemoryMap> {
-        use winapi::shared::basetsd::SIZE_T;
-        use winapi::shared::minwindef::DWORD;
-        use winapi::um::handleapi::CloseHandle;
-        let alignment = offset % allocation_granularity() as u64;
-        let aligned_offset = offset - alignment as u64;
-        let aligned_len = len + alignment as usize;
-        unsafe {
-            let handle = CreateFileMappingW(
-                file.as_raw_handle(),
-                ptr::null_mut(),
-                winapi::um::winnt::PAGE_READONLY,
-                0,
-                0,
-                ptr::null(),
-            );
-            if handle == ptr::null_mut() {
-                return Err(io::Error::last_os_error());
-            }
-            let ptr = MapViewOfFile(
-                handle,
-                winapi::um::memoryapi::FILE_MAP_READ,
-                (aligned_offset >> 16 >> 16) as DWORD,
-                (aligned_offset & 0xffffffff) as DWORD,
-                aligned_len as SIZE_T,
-            );
-            CloseHandle(handle);
-            if ptr == ptr::null_mut() {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(MemoryMap {
-                    file: Some(file.try_clone()?),
-                    ptr: ptr.offset(alignment as isize),
-                    len: len as usize,
-                })
-            }
-        }
-    }
-}
-
-#[cfg(windows)]
-fn allocation_granularity() -> usize {
-    use winapi::um::sysinfoapi::GetSystemInfo;
-    unsafe {
-        let mut info = mem::zeroed();
-        GetSystemInfo(&mut info);
-        return info.dwAllocationGranularity as usize;
-    }
-}
-
-#[cfg(windows)]
-impl Drop for MemoryMap {
-    fn drop(&mut self) {
-        use winapi::um::memoryapi::UnmapViewOfFile;
-        let alignment = self.ptr as usize % allocation_granularity();
-        unsafe {
-            let ptr = self.ptr.offset(-(alignment as isize));
-            assert_ne!(
-                UnmapViewOfFile(ptr),
-                0,
-                "unable to unmap mmap: {}",
-                io::Error::last_os_error()
-            );
-        }
-    }
 }
 
 #[derive(Debug)]
