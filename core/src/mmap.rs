@@ -15,6 +15,7 @@ use winapi::um::memoryapi::{CreateFileMappingW, MapViewOfFile};
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 
+/// 跨平台mmap实现（只读）
 pub struct MemoryMap {
     ptr: *mut c_void,
     len: usize,
@@ -166,5 +167,91 @@ impl Drop for MemoryMap {
                 io::Error::last_os_error()
             );
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::MemoryMap;
+    use rand::distributions::Alphanumeric;
+    use rand::Rng;
+    use std::env;
+    use std::fs::File;
+    use std::io::Write;
+    fn do_with_random_file<F, R>(f: F) -> std::io::Result<R>
+    where
+        F: Fn(&File) -> std::io::Result<R>,
+    {
+        let file_name: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(12)
+            .collect();
+        let mut dir = env::temp_dir();
+        dir.push(file_name + ".txt");
+        println!("temp file path:{:?}", dir);
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .open(&dir)?;
+        let r = f(&file).map_err(|r| {
+            if let Some(err) = std::fs::remove_file(&dir).err() {
+                eprintln!("{}", err);
+            }
+            r
+        })?;
+        Ok(r)
+    }
+
+    fn fill_content(f: &File, content: &str) -> std::io::Result<()> {
+        let mut bw = std::io::BufWriter::new(f);
+        bw.write(content.as_bytes())?;
+        bw.flush()?;
+        Ok(())
+    }
+
+    fn fill_random_content(f: &File, bytes_count: usize) -> std::io::Result<String> {
+        let mut bw = std::io::BufWriter::new(f);
+        let mut result: String = String::from("");
+        for i in 0..100 {
+            let content: String = rand::thread_rng()
+                .sample_iter(Alphanumeric)
+                .take(bytes_count / 100)
+                .collect();
+            bw.write(content.as_bytes())?;
+            result.push_str(&content);
+            println!("writing: {}%", i);
+        }
+        bw.flush()?;
+        Ok(result)
+    }
+
+    #[test]
+    fn test_create_memory_map() {
+        assert!(do_with_random_file(|file| {
+            fill_content(file, "123")?;
+            let mmap = MemoryMap::new(file, 0, file.metadata()?.len() as usize)?;
+            let content = String::from_utf8_lossy(&mmap);
+            if content == "123" {
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        })
+        .unwrap());
+    }
+    #[test]
+    fn test_big_memory_map() {
+        assert!(do_with_random_file(|file| {
+            let target = fill_random_content(file, 1024 * 1024 * 100)?;
+            let mmap = MemoryMap::new(file, 0, file.metadata()?.len() as usize)?;
+            let content = String::from_utf8_lossy(&mmap);
+            if content == target {
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        })
+        .unwrap());
     }
 }
